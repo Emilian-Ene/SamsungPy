@@ -1,4 +1,4 @@
-# Samsung MDC Control (Async)
+# Samsung Hybrid Screen Control (Async)
 
 ## Setup
 
@@ -9,6 +9,11 @@
 ```bash
 py -m pip install -r requirements.txt
 ```
+
+This installs both control stacks:
+
+- `python-samsung-mdc` for Samsung Signage displays (QMRE/QMR/QBR) via MDC (`1515`)
+- `samsungtvws` for Samsung consumer Smart TVs via WebSocket (`8001/8002`)
 
 ## CLI script
 
@@ -37,7 +42,26 @@ Run directly:
 py launch_dashboard.py
 ```
 
-This gives you buttons for status, reboot, volume, input source, mute, brightness, serial number, and `KEY_CONTENT` (Home equivalent).
+Use the **Protocol** selector in the Connection card:
+
+- `AUTO`: uses `SIGNAGE_MDC` when port is `1515`, otherwise `SMART_TV_WS`
+- `SIGNAGE_MDC`: force MDC mode (professional signage)
+- `SMART_TV_WS`: force Smart TV WebSocket mode (consumer TVs)
+
+Use **Auto Probe** to detect the device type by checking control ports in order: `1515`, `8002`, `8001`. The app then auto-fills `Port` and `Protocol`.
+The sidebar **⚡ Connect** action runs this probe automatically, then checks status.
+When the IP already exists in saved devices, detected `Port` and `Protocol` are saved automatically.
+
+Notes:
+
+- CLI Commands tab is MDC-only.
+- Some actions are protocol-specific. Smart TV mode supports status reachability, power/home/mute keys, while deep hardware controls (brightness, MDC screenshot, direct input source, serial) remain signage-focused.
+
+Consumer Smart TV quick CLI:
+
+- In the CLI tab, use **CONSUMER SMART TV KEYS** to send WebSocket keys (`KEY_HOME`, `KEY_POWER`, `KEY_MUTE`, `KEY_VOLUP`, `KEY_VOLDOWN`, etc.).
+- This section works only when protocol resolves to `SMART_TV_WS`.
+- One-click HDMI macros are available (`HDMI1`..`HDMI4`) and send `KEY_SOURCE` navigation sequences.
 
 ## Build EXE (Windows, Nuitka)
 

@@ -18,7 +18,37 @@ except ImportError:
 import customtkinter as ctk
 from samsung_mdc import MDC
 
+try:
+    from samsungtvws import SamsungTVWS
+    _SMARTTVWS_AVAILABLE = True
+except ImportError:
+    SamsungTVWS = None
+    _SMARTTVWS_AVAILABLE = False
+
 SAVED_DEVICES_FILE = Path("saved_devices.json")
+PROTOCOL_OPTIONS = ["AUTO", "SIGNAGE_MDC", "SMART_TV_WS"]
+SMART_TV_KEYS = [
+    "KEY_HOME",
+    "KEY_POWER",
+    "KEY_MUTE",
+    "KEY_VOLUP",
+    "KEY_VOLDOWN",
+    "KEY_SOURCE",
+    "KEY_MENU",
+    "KEY_RETURN",
+    "KEY_UP",
+    "KEY_DOWN",
+    "KEY_LEFT",
+    "KEY_RIGHT",
+    "KEY_ENTER",
+]
+
+SMART_TV_HDMI_MACROS = {
+    "HDMI1": ["KEY_SOURCE", "KEY_ENTER"],
+    "HDMI2": ["KEY_SOURCE", "KEY_RIGHT", "KEY_ENTER"],
+    "HDMI3": ["KEY_SOURCE", "KEY_RIGHT", "KEY_RIGHT", "KEY_ENTER"],
+    "HDMI4": ["KEY_SOURCE", "KEY_RIGHT", "KEY_RIGHT", "KEY_RIGHT", "KEY_ENTER"],
+}
 
 POWER_MAP = {0: "OFF", 1: "ON", 2: "REBOOT"}
 MUTE_MAP = {0: "OFF", 1: "ON", 255: "UNAVAILABLE"}
@@ -52,9 +82,20 @@ def normalize_device(item: dict):
     except Exception:
         device_id = 0
 
+    try:
+        port = int(item.get("port", 1515))
+    except Exception:
+        port = 1515
+
+    protocol = str(item.get("protocol", "AUTO")).strip().upper()
+    if protocol not in PROTOCOL_OPTIONS:
+        protocol = "AUTO"
+
     return {
         "ip": ip,
+        "port": port,
         "id": device_id,
+        "protocol": protocol,
         "site": str(item.get("site", "")).strip(),
         "description": str(item.get("description", "")).strip(),
     }
@@ -99,7 +140,9 @@ def parse_imported_devices(file_name: str, raw_bytes: bytes) -> list[dict]:
         for row in reader:
             mapped = {
                 "ip": row.get("ip") or row.get("IP") or "",
+                "port": row.get("port") or row.get("PORT") or 1515,
                 "id": row.get("id") or row.get("ID") or 0,
+                "protocol": row.get("protocol") or row.get("PROTOCOL") or "AUTO",
                 "site": row.get("site") or row.get("SITE") or "",
                 "description": row.get("description") or row.get("DESCRIPTION") or "",
             }
@@ -164,7 +207,7 @@ def decode_status(raw_status):
 class SamsungDashboard(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Samsung MDC Dashboard")
+        self.title("Samsung Hybrid Screen Dashboard")
         self.geometry("1220x780")
         self.minsize(1100, 720)
 
@@ -198,6 +241,7 @@ class SamsungDashboard(ctk.CTk):
         self.ip_var = ctk.StringVar(value="192.168.1.50")
         self.port_var = ctk.StringVar(value="1515")
         self.id_var = ctk.StringVar(value="0")
+        self.protocol_var = ctk.StringVar(value="AUTO")
         self.site_var = ctk.StringVar(value="")
         self.description_var = ctk.StringVar(value="")
 
@@ -212,6 +256,8 @@ class SamsungDashboard(ctk.CTk):
         self._all_cli_commands = sorted(MDC._commands.keys())
         self.cli_command_var = ctk.StringVar(value=self._all_cli_commands[0] if self._all_cli_commands else "")
         self.cli_arg_var = ctk.StringVar(value="")
+        self.consumer_key_var = ctk.StringVar(value=SMART_TV_KEYS[0])
+        self.consumer_repeat_var = ctk.StringVar(value="1")
         self.cli_log_box: ctk.CTkTextbox | None = None
         # dynamic per-field widgets rebuilt on command change
         self._cli_arg_rows: list[dict] = []   # [{"var": StringVar, "enum": list|None}, ...]
@@ -268,7 +314,7 @@ class SamsungDashboard(ctk.CTk):
         ctk.CTkLabel(logo_frame, text="🖥  SamsungPy",
                      font=ctk.CTkFont(size=20, weight="bold"),
                      text_color="#e8f4fd").grid(row=0, column=0, padx=20, pady=16, sticky="w")
-        ctk.CTkLabel(logo_frame, text="MDC Control Dashboard",
+        ctk.CTkLabel(logo_frame, text="Hybrid Screen Control Dashboard",
                      font=ctk.CTkFont(size=11),
                      text_color="#7fb3d3").grid(row=1, column=0, padx=20, pady=(0, 14), sticky="w")
 
@@ -331,7 +377,7 @@ class SamsungDashboard(ctk.CTk):
         tab_dash.grid_columnconfigure(0, weight=1)
         tab_dash.grid_rowconfigure(4, weight=1)
         tab_cli.grid_columnconfigure(0, weight=1)
-        tab_cli.grid_rowconfigure(3, weight=1)
+        tab_cli.grid_rowconfigure(4, weight=1)
 
         # ── Bottom status bar ─────────────────────────────────────────────
         status_bar = ctk.CTkFrame(self, height=32, corner_radius=0, fg_color=p["card2_bg"])
@@ -355,24 +401,43 @@ class SamsungDashboard(ctk.CTk):
         conn_card = self._card(tab_dash)
         conn_card.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 5))
         self._section_label(conn_card, "  CONNECTION").grid(
-            row=0, column=0, columnspan=6, padx=14, pady=(10, 4), sticky="w")
-        for c in range(6):
+            row=0, column=0, columnspan=7, padx=14, pady=(10, 4), sticky="w")
+        for c in range(7):
             conn_card.grid_columnconfigure(c, weight=1)
         for col, (label, var) in enumerate([
             ("IP Address",  self.ip_var),
             ("Port",        self.port_var),
+            ("Protocol",    self.protocol_var),
             ("Display ID",  self.id_var),
             ("Site",        self.site_var),
             ("Description", self.description_var),
         ]):
             ctk.CTkLabel(conn_card, text=label, font=ctk.CTkFont(size=11),
                          text_color="#7fb3d3").grid(row=1, column=col, padx=8, pady=(0, 2), sticky="w")
-            ctk.CTkEntry(conn_card, textvariable=var,
-                         fg_color=p["bar_bg"], border_color="#2a4f7a",
-                         corner_radius=8).grid(row=2, column=col, padx=8, pady=(0, 10), sticky="ew")
-        self._btn(conn_card, "Check Status", self.get_status,
+            if label == "Protocol":
+                ctk.CTkOptionMenu(
+                    conn_card,
+                    variable=var,
+                    values=PROTOCOL_OPTIONS,
+                    fg_color=p["bar_bg"],
+                    button_color="#2a4f7a",
+                    button_hover_color="#345a87",
+                    dropdown_fg_color=p["card2_bg"],
+                ).grid(row=2, column=col, padx=8, pady=(0, 10), sticky="ew")
+            else:
+                ctk.CTkEntry(conn_card, textvariable=var,
+                             fg_color=p["bar_bg"], border_color="#2a4f7a",
+                             corner_radius=8).grid(row=2, column=col, padx=8, pady=(0, 10), sticky="ew")
+
+        conn_actions = ctk.CTkFrame(conn_card, fg_color="transparent")
+        conn_actions.grid(row=2, column=6, padx=8, pady=(0, 10), sticky="ew")
+        conn_actions.grid_columnconfigure((0, 1), weight=1)
+        self._btn(conn_actions, "Check Status", self.get_status,
                   icon="🔍", color=p["success"], hover=p["success_hover"],
-                  height=36).grid(row=2, column=5, padx=8, pady=(0, 10), sticky="ew")
+                  height=36).grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        self._btn(conn_actions, "Auto Probe", self.auto_probe_protocol,
+                  icon="🧭", color=p["neutral"], hover=p["neutral_hover"],
+                  height=36).grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
         # Quick actions card
         qa_card = self._card(tab_dash)
@@ -489,8 +554,52 @@ class SamsungDashboard(ctk.CTk):
                   lambda: self.cli_log_box and self.cli_log_box.delete("1.0", "end"),
                   color=p["neutral"], hover=p["neutral_hover"], width=88, height=34).pack(side="left")
 
+        consumer_card = self._card(tab_cli)
+        consumer_card.grid(row=1, column=0, sticky="ew", padx=8, pady=5)
+        consumer_card.grid_columnconfigure(1, weight=1)
+        self._section_label(consumer_card, "  CONSUMER SMART TV KEYS").grid(
+            row=0, column=0, columnspan=5, padx=14, pady=(10, 4), sticky="w")
+        ctk.CTkLabel(consumer_card, text="Key:", text_color="#a0c4e0",
+                     font=ctk.CTkFont(size=12)).grid(row=1, column=0, padx=(14, 6), pady=(0, 10), sticky="w")
+        ctk.CTkOptionMenu(
+            consumer_card,
+            variable=self.consumer_key_var,
+            values=SMART_TV_KEYS,
+            fg_color=p["bar_bg"],
+            button_color=p["accent"],
+            button_hover_color=p["accent_hover"],
+            corner_radius=8,
+        ).grid(row=1, column=1, padx=8, pady=(0, 10), sticky="ew")
+        ctk.CTkLabel(consumer_card, text="Repeat:", text_color="#a0c4e0",
+                     font=ctk.CTkFont(size=12)).grid(row=1, column=2, padx=(8, 6), pady=(0, 10), sticky="w")
+        ctk.CTkEntry(
+            consumer_card,
+            textvariable=self.consumer_repeat_var,
+            width=70,
+            fg_color=p["bar_bg"], border_color="#2a4f7a", corner_radius=8,
+        ).grid(row=1, column=3, padx=(0, 8), pady=(0, 10), sticky="w")
+        self._btn(consumer_card, "Send Key", self.cli_send_consumer_key,
+                  icon="📺", color=p["warning"], hover=p["warning_hover"],
+                  width=120, height=34).grid(row=1, column=4, padx=(0, 14), pady=(0, 10), sticky="e")
+
+        ctk.CTkLabel(consumer_card, text="HDMI Macro:", text_color="#a0c4e0",
+                     font=ctk.CTkFont(size=12)).grid(row=2, column=0, padx=(14, 6), pady=(0, 10), sticky="w")
+        hdmi_macro_row = ctk.CTkFrame(consumer_card, fg_color="transparent")
+        hdmi_macro_row.grid(row=2, column=1, columnspan=4, padx=(8, 14), pady=(0, 10), sticky="ew")
+        for idx, hdmi_name in enumerate(["HDMI1", "HDMI2", "HDMI3", "HDMI4"]):
+            hdmi_macro_row.grid_columnconfigure(idx, weight=1)
+            self._btn(
+                hdmi_macro_row,
+                hdmi_name,
+                command=lambda n=hdmi_name: self.cli_send_consumer_hdmi_macro(n),
+                icon="🎛",
+                color=p["neutral"],
+                hover=p["neutral_hover"],
+                height=30,
+            ).grid(row=0, column=idx, padx=(0 if idx == 0 else 4, 0), sticky="ew")
+
         args_card = self._card(tab_cli)
-        args_card.grid(row=1, column=0, sticky="ew", padx=8, pady=5)
+        args_card.grid(row=2, column=0, sticky="ew", padx=8, pady=5)
         args_card.grid_columnconfigure(0, weight=1)
         self._section_label(args_card, "  ARGUMENTS").grid(
             row=0, column=0, padx=14, pady=(10, 4), sticky="w")
@@ -501,7 +610,7 @@ class SamsungDashboard(ctk.CTk):
         self.cli_args_scroll.grid_columnconfigure(3, weight=1)
 
         manual_card = self._card(tab_cli)
-        manual_card.grid(row=2, column=0, sticky="ew", padx=8, pady=5)
+        manual_card.grid(row=3, column=0, sticky="ew", padx=8, pady=5)
         manual_card.grid_columnconfigure(1, weight=1)
         self._section_label(manual_card, "  MANUAL OVERRIDE  (optional)").grid(
             row=0, column=0, columnspan=3, padx=14, pady=(10, 4), sticky="w")
@@ -515,7 +624,7 @@ class SamsungDashboard(ctk.CTk):
         self.cli_arg_entry.grid(row=1, column=1, columnspan=2, padx=(0, 14), pady=(0, 10), sticky="ew")
 
         cli_log_card = self._card(tab_cli)
-        cli_log_card.grid(row=3, column=0, sticky="nsew", padx=8, pady=(5, 8))
+        cli_log_card.grid(row=4, column=0, sticky="nsew", padx=8, pady=(5, 8))
         cli_log_card.grid_columnconfigure(0, weight=1)
         cli_log_card.grid_rowconfigure(1, weight=1)
         self._section_label(cli_log_card, "  COMMAND OUTPUT").grid(
@@ -699,6 +808,10 @@ class SamsungDashboard(ctk.CTk):
         return tuple(result)
 
     def cli_get(self):
+        if self._effective_protocol() != "SIGNAGE_MDC":
+            self.cli_log("CLI commands are MDC-only. Set Protocol to SIGNAGE_MDC (or AUTO + port 1515).")
+            return
+
         command_name = self.cli_command_var.get().strip()
         if not command_name:
             return
@@ -732,6 +845,10 @@ class SamsungDashboard(ctk.CTk):
         threading.Thread(target=_thread, daemon=True).start()
 
     def cli_set(self):
+        if self._effective_protocol() != "SIGNAGE_MDC":
+            self.cli_log("CLI commands are MDC-only. Set Protocol to SIGNAGE_MDC (or AUTO + port 1515).")
+            return
+
         command_name = self.cli_command_var.get().strip()
         if not command_name:
             return
@@ -771,7 +888,60 @@ class SamsungDashboard(ctk.CTk):
 
         threading.Thread(target=_thread, daemon=True).start()
 
-    def _validate_connection_fields(self) -> tuple[str, int, int]:
+    def cli_send_consumer_key(self):
+        if self._effective_protocol() != "SMART_TV_WS":
+            self.cli_log("Consumer key CLI is Smart TV only. Set Protocol to SMART_TV_WS (or AUTO + port 8002/8001).")
+            return
+
+        key = self.consumer_key_var.get().strip().upper()
+        if key not in SMART_TV_KEYS:
+            self.cli_log(f"Unknown Smart TV key: {key}")
+            return
+
+        try:
+            repeat = int(self.consumer_repeat_var.get().strip())
+        except Exception:
+            self.cli_log("Repeat must be a number.")
+            return
+
+        if repeat < 1:
+            repeat = 1
+        if repeat > 20:
+            repeat = 20
+
+        def _smart_tv_worker(tv):
+            self._smarttv_send_keys(tv, key, times=repeat)
+            return f"{key} x{repeat}"
+
+        self._run_async_action(
+            "Smart TV key",
+            mdc_worker=None,
+            smart_tv_worker=_smart_tv_worker,
+            on_success=lambda result: self.cli_log(f"Consumer CLI → {result}"),
+        )
+
+    def cli_send_consumer_hdmi_macro(self, hdmi_name: str):
+        if self._effective_protocol() != "SMART_TV_WS":
+            self.cli_log("HDMI macro is Smart TV only. Set Protocol to SMART_TV_WS (or AUTO + port 8002/8001).")
+            return
+
+        sequence = SMART_TV_HDMI_MACROS.get(hdmi_name)
+        if not sequence:
+            self.cli_log(f"Unknown HDMI macro: {hdmi_name}")
+            return
+
+        def _smart_tv_worker(tv):
+            self._smarttv_send_sequence(tv, sequence)
+            return f"{hdmi_name} ({' -> '.join(sequence)})"
+
+        self._run_async_action(
+            f"Smart TV {hdmi_name}",
+            mdc_worker=None,
+            smart_tv_worker=_smart_tv_worker,
+            on_success=lambda result: self.cli_log(f"Consumer HDMI macro → {result}"),
+        )
+
+    def _validate_connection_fields(self) -> tuple[str, int, int, str]:
         ip = self.ip_var.get().strip()
         if not ip:
             raise ValueError("IP is required")
@@ -786,20 +956,118 @@ class SamsungDashboard(ctk.CTk):
         except Exception as exc:
             raise ValueError("Display ID must be a number") from exc
 
-        return ip, port, display_id
+        protocol = self.protocol_var.get().strip().upper()
+        if protocol not in PROTOCOL_OPTIONS:
+            protocol = "AUTO"
+
+        return ip, port, display_id, protocol
+
+    def _effective_protocol(self) -> str:
+        protocol = self.protocol_var.get().strip().upper()
+        if protocol not in PROTOCOL_OPTIONS:
+            protocol = "AUTO"
+
+        if protocol != "AUTO":
+            return protocol
+
+        try:
+            port = int(self.port_var.get().strip())
+        except Exception:
+            port = 1515
+
+        return "SIGNAGE_MDC" if port == 1515 else "SMART_TV_WS"
 
     async def _execute_mdc(self, worker):
-        ip, port, display_id = self._validate_connection_fields()
+        ip, port, display_id, _ = self._validate_connection_fields()
         target = f"{ip}:{port}"
         async with MDC(target) as mdc:
             return await worker(mdc, display_id)
 
-    def _run_async_action(self, action_name: str, worker, on_success=None):
+    def _execute_smart_tv_ws(self, worker):
+        if not _SMARTTVWS_AVAILABLE:
+            raise RuntimeError("samsungtvws is not installed. Run: pip install samsungtvws")
+
+        ip, port, _, _ = self._validate_connection_fields()
+        token_dir = Path.home() / "Documents" / "SamsungMDC" / "tokens"
+        token_dir.mkdir(parents=True, exist_ok=True)
+        token_file = token_dir / f"tv_token_{ip.replace('.', '_')}.txt"
+
+        tv = SamsungTVWS(ip, port=port, token_file=str(token_file), name="SamsungPy Hybrid")
+        try:
+            return worker(tv)
+        except Exception as exc:
+            raise RuntimeError(self._format_smart_tv_error(exc, ip, port)) from exc
+
+    @staticmethod
+    def _format_smart_tv_error(exc: Exception, ip: str, port: int) -> str:
+        text = str(exc)
+        kind = exc.__class__.__name__
+
+        if kind == "UnauthorizedError" or "ms.channel.unauthorized" in text:
+            return (
+                f"Smart TV authorization required on {ip}:{port}. "
+                "Look at the TV and allow the remote request for SamsungPy Hybrid, then retry."
+            )
+
+        if kind in ("ConnectionFailure", "TimeoutError"):
+            return (
+                f"Smart TV connection failed on {ip}:{port}. "
+                "Ensure TV is ON, same network, and use Auto Probe (ports 8002/8001)."
+            )
+
+        return f"Smart TV command failed on {ip}:{port}: {text or kind}"
+
+    @staticmethod
+    def _smarttv_send_key(tv, key: str) -> None:
+        SamsungDashboard._smarttv_send_keys(tv, key, times=1)
+
+    @staticmethod
+    def _smarttv_send_keys(tv, key: str, times: int = 1) -> None:
+        if not hasattr(tv, "send_key"):
+            raise RuntimeError("Connected Smart TV client does not expose send_key().")
+
+        try:
+            tv.open()
+            for _ in range(max(1, int(times))):
+                tv.send_key(key)
+        finally:
+            try:
+                tv.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _smarttv_send_sequence(tv, keys: list[str], key_press_delay: float = 0.6) -> None:
+        if not hasattr(tv, "send_key"):
+            raise RuntimeError("Connected Smart TV client does not expose send_key().")
+
+        try:
+            tv.open()
+            for key in keys:
+                try:
+                    tv.send_key(key, key_press_delay=key_press_delay)
+                except TypeError:
+                    tv.send_key(key)
+        finally:
+            try:
+                tv.close()
+            except Exception:
+                pass
+
+    def _run_async_action(self, action_name: str, mdc_worker=None, smart_tv_worker=None, on_success=None):
         self.status_var.set(f"Status: {action_name}...")
 
         def _thread_target():
             try:
-                result = asyncio.run(self._execute_mdc(worker))
+                protocol = self._effective_protocol()
+                if protocol == "SIGNAGE_MDC":
+                    if not mdc_worker:
+                        raise RuntimeError(f"{action_name} is not available for MDC in this screen.")
+                    result = asyncio.run(self._execute_mdc(mdc_worker))
+                else:
+                    if not smart_tv_worker:
+                        raise RuntimeError(f"{action_name} is not available for Smart TV WebSocket.")
+                    result = self._execute_smart_tv_ws(smart_tv_worker)
                 self.after(0, lambda: self._action_success(action_name, result, on_success))
             except Exception as exc:
                 self.after(0, lambda exc=exc: self._action_error(action_name, exc))
@@ -861,6 +1129,8 @@ class SamsungDashboard(ctk.CTk):
         for row_idx, device in enumerate(visible):
             ip   = device.get("ip", "")
             did  = device.get("id", 0)
+            port = device.get("port", 1515)
+            protocol = str(device.get("protocol", "AUTO")).upper()
             site = device.get("site") or ip
             desc = device.get("description", "")
 
@@ -877,10 +1147,44 @@ class SamsungDashboard(ctk.CTk):
             # site + IP labels
             info = ctk.CTkFrame(card, fg_color="transparent")
             info.grid(row=0, column=0, padx=10, pady=(6, 2), sticky="w")
-            ctk.CTkLabel(info, text=site,
+
+            badge_text = "AUTO"
+            badge_color = p["neutral"]
+            if protocol == "SIGNAGE_MDC":
+                badge_text = "MDC"
+                badge_color = p["success"]
+            elif protocol == "SMART_TV_WS":
+                badge_text = "WS"
+                badge_color = p["warning"]
+
+            top_row = ctk.CTkFrame(info, fg_color="transparent")
+            top_row.pack(fill="x", anchor="w")
+            ctk.CTkLabel(top_row, text=site,
                          font=ctk.CTkFont(size=12, weight="bold"),
-                         text_color="#e8f4fd").pack(anchor="w")
-            ctk.CTkLabel(info, text=f"{ip}  ·  ID {did}" + (f"  ·  {desc}" if desc else ""),
+                         text_color="#e8f4fd").pack(side="left", anchor="w")
+
+            def _make_protocol_pick(captured_ip=ip, captured_protocol=protocol):
+                def _pick():
+                    self.selected_device_var.set(captured_ip)
+                    self._on_selected_device(captured_ip)
+                    if captured_protocol in PROTOCOL_OPTIONS:
+                        self.protocol_var.set(captured_protocol)
+                    self._rebuild_devices_list()
+                    self.log(f"Applied protocol {self.protocol_var.get()} for {captured_ip}")
+                    self.get_status()
+                return _pick
+
+            ctk.CTkButton(top_row, text=badge_text,
+                          fg_color=badge_color,
+                          hover_color=badge_color,
+                          corner_radius=6,
+                          width=42,
+                          height=20,
+                          text_color="#ffffff",
+                          font=ctk.CTkFont(size=10, weight="bold"),
+                          command=_make_protocol_pick()).pack(side="right", padx=(8, 0))
+
+            ctk.CTkLabel(info, text=f"{ip}:{port}  ·  ID {did}  ·  {protocol}" + (f"  ·  {desc}" if desc else ""),
                          font=ctk.CTkFont(size=10), text_color="#7fb3d3").pack(anchor="w")
 
             btns = ctk.CTkFrame(card, fg_color="transparent")
@@ -899,7 +1203,7 @@ class SamsungDashboard(ctk.CTk):
                     self.selected_device_var.set(captured_ip)
                     self._on_selected_device(captured_ip)
                     self._rebuild_devices_list()
-                    self.get_status()
+                    self.auto_probe_protocol(on_done=self.get_status)
                 return _connect
 
             ctk.CTkButton(
@@ -924,7 +1228,9 @@ class SamsungDashboard(ctk.CTk):
         if not selected:
             return
         self.ip_var.set(selected.get("ip", ""))
+        self.port_var.set(str(selected.get("port", 1515)))
         self.id_var.set(str(selected.get("id", 0)))
+        self.protocol_var.set(selected.get("protocol", "AUTO"))
         self.site_var.set(selected.get("site", ""))
         self.description_var.set(selected.get("description", ""))
 
@@ -932,7 +1238,9 @@ class SamsungDashboard(ctk.CTk):
         candidate = normalize_device(
             {
                 "ip": self.ip_var.get(),
+                "port": self.port_var.get(),
                 "id": self.id_var.get(),
+                "protocol": self.protocol_var.get(),
                 "site": self.site_var.get(),
                 "description": self.description_var.get(),
             }
@@ -1028,84 +1336,201 @@ class SamsungDashboard(ctk.CTk):
 
         threading.Thread(target=_check, daemon=True).start()
 
+    @staticmethod
+    def _probe_port(ip: str, port: int, timeout: float = 1.0) -> bool:
+        try:
+            with socket.create_connection((ip, port), timeout=timeout):
+                return True
+        except Exception:
+            return False
+
+    def _persist_detected_profile(self, ip: str, port: int, protocol: str) -> None:
+        existing = find_device_by_ip(self.saved_devices, ip)
+        if not existing:
+            return
+
+        changed = False
+        if int(existing.get("port", 1515)) != int(port):
+            existing["port"] = int(port)
+            changed = True
+        if str(existing.get("protocol", "AUTO")).upper() != str(protocol).upper():
+            existing["protocol"] = str(protocol).upper()
+            changed = True
+
+        if not changed:
+            return
+
+        save_saved_devices(self.saved_devices)
+        self._refresh_saved_devices_menu()
+        self.log(f"Saved profile updated for {ip}: {protocol} on port {port}")
+
+    def auto_probe_protocol(self, on_done=None):
+        ip = self.ip_var.get().strip()
+        if not ip:
+            self.log("Auto probe failed: IP is required")
+            self.status_var.set("Status: Auto Probe failed")
+            return
+
+        self.status_var.set("Status: Auto Probe...")
+
+        def _thread_target():
+            candidates = [
+                (1515, "SIGNAGE_MDC"),
+                (8002, "SMART_TV_WS"),
+                (8001, "SMART_TV_WS"),
+            ]
+
+            found_port = None
+            found_protocol = None
+
+            for port, protocol in candidates:
+                if self._probe_port(ip, port, timeout=1.2):
+                    found_port = port
+                    found_protocol = protocol
+                    break
+
+            def _apply_result():
+                if found_port is None or found_protocol is None:
+                    self.status_var.set("Status: Auto Probe failed")
+                    self.network_var.set("Network: OFFLINE")
+                    self.net_dot.configure(text_color="#e74c3c")
+                    self.log("Auto probe: no supported control ports reachable (1515/8002/8001)")
+                    return
+
+                self.port_var.set(str(found_port))
+                self.protocol_var.set(found_protocol)
+                self._persist_detected_profile(ip, found_port, found_protocol)
+                self.status_var.set("Status: Auto Probe OK")
+                self.network_var.set(f"Network: ONLINE (port {found_port})")
+                self.net_dot.configure(text_color="#2ecc71")
+                self.log(f"Auto probe: selected {found_protocol} on {ip}:{found_port}")
+                if callable(on_done):
+                    on_done()
+
+            self.after(0, _apply_result)
+
+        threading.Thread(target=_thread_target, daemon=True).start()
+
     def get_status(self):
-        async def _worker(mdc: MDC, display_id: int):
+        async def _mdc_worker(mdc: MDC, display_id: int):
             return await mdc.status(display_id)
 
-        def _on_success(result):
-            decoded = decode_status(result)
-            self.log(
-                "Power: {power}, Volume: {volume}, Mute: {mute}, Input: {input_source}, Aspect: {picture_aspect}".format(
-                    **decoded
-                )
-            )
+        def _smart_tv_worker(tv):
+            info = {}
+            if hasattr(tv, "rest_device_info"):
+                try:
+                    info = tv.rest_device_info()
+                except Exception:
+                    info = {}
+            return info
 
-        self._run_async_action("Status", _worker, _on_success)
+        def _on_success(result):
+            if isinstance(result, tuple):
+                decoded = decode_status(result)
+                self.log(
+                    "Power: {power}, Volume: {volume}, Mute: {mute}, Input: {input_source}, Aspect: {picture_aspect}".format(
+                        **decoded
+                    )
+                )
+                return
+
+            device_name = result.get("device", {}).get("name") if isinstance(result, dict) else None
+            model_name = result.get("device", {}).get("modelName") if isinstance(result, dict) else None
+            self.log(f"Smart TV reachable. Device: {device_name or 'N/A'}, Model: {model_name or 'N/A'}")
+
+        self._run_async_action("Status", _mdc_worker, _smart_tv_worker, _on_success)
 
     def get_serial(self):
-        async def _worker(mdc: MDC, display_id: int):
+        async def _mdc_worker(mdc: MDC, display_id: int):
             return await mdc.serial_number(display_id)
 
-        self._run_async_action("Serial", _worker, lambda serial: self.log(f"Serial: {serial}"))
+        def _smart_tv_worker(tv):
+            return "Not available on Smart TV WebSocket API"
+
+        self._run_async_action("Serial", _mdc_worker, _smart_tv_worker, lambda serial: self.log(f"Serial: {serial}"))
 
     def reboot_screen(self):
-        async def _worker(mdc: MDC, display_id: int):
+        async def _mdc_worker(mdc: MDC, display_id: int):
             await mdc.power(display_id, ("REBOOT",))
             return None
 
-        self._run_async_action("Reboot", _worker)
+        def _smart_tv_worker(tv):
+            self._smarttv_send_key(tv, "KEY_POWER")
+            return None
+
+        self._run_async_action("Reboot", _mdc_worker, _smart_tv_worker)
 
     def send_home_key(self):
-        async def _worker(mdc: MDC, display_id: int):
+        async def _mdc_worker(mdc: MDC, display_id: int):
             await mdc.virtual_remote(display_id, ("KEY_CONTENT",))
             return None
 
-        self._run_async_action("KEY_CONTENT", _worker)
+        def _smart_tv_worker(tv):
+            self._smarttv_send_key(tv, "KEY_HOME")
+            return None
+
+        self._run_async_action("Home", _mdc_worker, _smart_tv_worker)
 
     def set_volume(self):
         value = int(self.volume_var.get())
 
-        async def _worker(mdc: MDC, display_id: int):
+        async def _mdc_worker(mdc: MDC, display_id: int):
             await mdc.volume(display_id, (value,))
             return value
 
-        self._run_async_action("Set volume", _worker, lambda result: self.log(f"Volume set to {result}"))
+        def _smart_tv_worker(tv):
+            raise RuntimeError("Absolute volume set is not supported in hybrid mode for Smart TVs.")
+
+        self._run_async_action("Set volume", _mdc_worker, _smart_tv_worker, lambda result: self.log(f"Volume set to {result}"))
 
     def set_brightness(self):
         value = int(self.brightness_var.get())
 
-        async def _worker(mdc: MDC, display_id: int):
+        async def _mdc_worker(mdc: MDC, display_id: int):
             await mdc.brightness(display_id, (value,))
             return value
 
-        self._run_async_action("Set brightness", _worker, lambda result: self.log(f"Brightness set to {result}"))
+        def _smart_tv_worker(tv):
+            raise RuntimeError("Brightness control is not supported on Smart TV WebSocket API.")
+
+        self._run_async_action("Set brightness", _mdc_worker, _smart_tv_worker, lambda result: self.log(f"Brightness set to {result}"))
 
     def set_input_source(self):
         source = self.input_var.get().strip()
 
-        async def _worker(mdc: MDC, display_id: int):
+        async def _mdc_worker(mdc: MDC, display_id: int):
             await mdc.input_source(display_id, (source,))
             return source
 
-        self._run_async_action("Set input", _worker, lambda result: self.log(f"Input source set to {result}"))
+        def _smart_tv_worker(tv):
+            raise RuntimeError("Direct input source switching is not supported on Smart TV WebSocket API.")
+
+        self._run_async_action("Set input", _mdc_worker, _smart_tv_worker, lambda result: self.log(f"Input source set to {result}"))
 
     def set_mute(self):
         current = self.mute_var.get().strip().upper()
         next_state = "ON" if current != "ON" else "OFF"
         self.mute_var.set(next_state)
 
-        async def _worker(mdc: MDC, display_id: int):
+        async def _mdc_worker(mdc: MDC, display_id: int):
             await mdc.mute(display_id, (next_state,))
             return next_state
 
-        self._run_async_action("Mute", _worker, lambda result: self.log(f"Mute set to {result}"))
+        def _smart_tv_worker(tv):
+            self._smarttv_send_key(tv, "KEY_MUTE")
+            return next_state
+
+        self._run_async_action("Mute", _mdc_worker, _smart_tv_worker, lambda result: self.log(f"Mute set to {result}"))
 
     def take_screenshot(self):
         """Capture a screenshot from the Samsung display and show/save it."""
-        async def _worker(mdc: MDC, display_id: int):
+        async def _mdc_worker(mdc: MDC, display_id: int):
             if not hasattr(mdc, "screen_capture"):
                 raise RuntimeError("screen_capture is not supported by this python-samsung-mdc version or device.")
             return await mdc.screen_capture(display_id)
+
+        def _smart_tv_worker(tv):
+            raise RuntimeError("Screenshot capture is not supported on Smart TV WebSocket API.")
 
         def _on_success(image_bytes: bytes):
             # Save to user Documents folder so it works both in dev and as EXE
@@ -1162,7 +1587,7 @@ class SamsungDashboard(ctk.CTk):
                 self.log(f"Screenshot preview error: {exc}")
                 messagebox.showinfo("Screenshot", f"Saved to {out_path}")
 
-        self._run_async_action("Screenshot", _worker, _on_success)
+        self._run_async_action("Screenshot", _mdc_worker, _smart_tv_worker, _on_success)
 
 
 def main() -> None:

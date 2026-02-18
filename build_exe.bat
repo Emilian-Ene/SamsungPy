@@ -17,6 +17,9 @@ py -m PyInstaller ^
     --hidden-import customtkinter ^
     --hidden-import darkdetect ^
     --hidden-import samsung_mdc ^
+    --hidden-import samsungtvws ^
+    --hidden-import websocket ^
+    --hidden-import requests ^
     --hidden-import PIL ^
     --hidden-import PIL._tkinter_finder ^
     launch_dashboard.py
